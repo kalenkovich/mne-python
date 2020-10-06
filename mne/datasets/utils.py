@@ -5,6 +5,7 @@
 #          Stefan Appelhoff <stefan.appelhoff@mailbox.org>
 # License: BSD Style.
 
+from collections import OrderedDict
 import os
 import os.path as op
 import shutil
@@ -239,9 +240,8 @@ def _data_path(path=None, force_update=False, update_path=True, download=True,
     path = _get_path(path, key, name)
     # To update the testing or misc dataset, push commits, then make a new
     # release on GitHub. Then update the "releases" variable:
-    releases = dict(testing='0.93', misc='0.6')
+    releases = dict(testing='0.106', misc='0.6')
     # And also update the "md5_hashes['testing']" variable below.
-
     # To update any other dataset, update the data archive itself (upload
     # an updated version) and update the md5 hash.
 
@@ -258,7 +258,7 @@ def _data_path(path=None, force_update=False, update_path=True, download=True,
         misc='https://codeload.github.com/mne-tools/mne-misc-data/'
              'tar.gz/%s' % releases['misc'],
         sample='https://osf.io/86qa2/download?version=5',
-        somato='https://osf.io/tp4sg/download?version=6',
+        somato='https://osf.io/tp4sg/download?version=7',
         spm='https://osf.io/je4s8/download?version=2',
         testing='https://codeload.github.com/mne-tools/mne-testing-data/'
                 'tar.gz/%s' % releases['testing'],
@@ -324,9 +324,9 @@ def _data_path(path=None, force_update=False, update_path=True, download=True,
         fake='3194e9f7b46039bb050a74f3e1ae9908',
         misc='e00808c3b05123059e2cf49ff276e919',
         sample='12b75d1cb7df9dfb4ad73ed82f61094f',
-        somato='ea825966c0a1e9b2f84e3826c5500161',
+        somato='32fd2f6c8c7eb0784a1de6435273c48b',
         spm='9f43f67150e3b694b523a21eb929ea75',
-        testing='2eb998a0893a28faedd583973c70b517',
+        testing='d67eff9e1089f15b69f88931dbbf35df',
         multimodal='26ec847ae9ab80f58f204d09e2c08367',
         fnirs_motor='c4935d19ddab35422a69f3326a01fef8',
         opm='370ad1dcfd5c47e029e692c85358a374',
@@ -701,7 +701,7 @@ def fetch_hcp_mmp_parcellation(subjects_dir=None, combine=True, verbose=None):
             return
         # otherwise, let's make them
         logger.info('Creating combined labels')
-        groups = dict([
+        groups = OrderedDict([
             ('Primary Visual Cortex (V1)',
              ('V1',)),
             ('Early Visual Cortex',

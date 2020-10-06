@@ -728,10 +728,25 @@ def test_proj(tmpdir):
         assert_allclose(data_proj_1, data_proj_2)
         assert_allclose(data_proj_2, np.dot(raw._projector, data_proj_2))
 
+    # Test that picking removes projectors ...
+    raw = read_raw_fif(fif_fname)
+    n_projs = len(raw.info['projs'])
+    raw.pick_types(meg=False, eeg=True)
+    assert len(raw.info['projs']) == n_projs - 3
+
+    # ... but only if it doesn't apply to any channels in the dataset anymore.
+    raw = read_raw_fif(fif_fname)
+    n_projs = len(raw.info['projs'])
+    raw.pick_types(meg='mag', eeg=True)
+    assert len(raw.info['projs']) == n_projs
+
+    # I/O roundtrip of an MEG projector with a Raw that only contains EEG
+    # data.
     out_fname = tmpdir.join('test_raw.fif')
     raw = read_raw_fif(test_fif_fname, preload=True).crop(0, 0.002)
+    proj = raw.info['projs'][-1]
     raw.pick_types(meg=False, eeg=True)
-    raw.info['projs'] = [raw.info['projs'][-1]]
+    raw.info['projs'] = [proj]  # Restore, because picking removed it!
     raw._data.fill(0)
     raw._data[-1] = 1.
     raw.save(out_fname)
@@ -841,8 +856,10 @@ def test_filter():
     assert_array_almost_equal(data_bs, data_notch, sig_dec_notch)
 
     # now use the sinusoidal fitting
+    assert raw.times[-1] < 10  # catch error with filter_length > n_times
     raw_notch = raw.copy().notch_filter(
-        None, picks=picks, n_jobs=2, method='spectrum_fit')
+        None, picks=picks, n_jobs=2, method='spectrum_fit',
+        filter_length='10s')
     data_notch, _ = raw_notch[picks, :]
     data, _ = raw[picks, :]
     assert_array_almost_equal(data, data_notch, sig_dec_notch_fit)
@@ -1029,6 +1046,9 @@ def test_resample(tmpdir, preload):
     assert raw1.first_samp == raw3.first_samp
     assert raw1.last_samp == raw3.last_samp
     assert raw1.info['sfreq'] == raw3.info['sfreq']
+
+    # smoke test crop after resample
+    raw4.crop(tmin=raw4.times[1], tmax=raw4.times[-1])
 
     # test resampling of stim channel
 
@@ -1462,6 +1482,16 @@ def test_drop_channels_mixin():
     assert ch_names == raw.ch_names
     assert len(ch_names) == len(raw._cals)
     assert len(ch_names) == raw._data.shape[0]
+
+    # Test that dropping all channels a projector applies to will lead to the
+    # removal of said projector.
+    raw = read_raw_fif(fif_fname)
+    n_projs = len(raw.info['projs'])
+    eeg_names = raw.info['projs'][-1]['data']['col_names']
+    with pytest.raises(RuntimeError, match='loaded'):
+        raw.copy().apply_proj().drop_channels(eeg_names)
+    raw.load_data().drop_channels(eeg_names)  # EEG proj
+    assert len(raw.info['projs']) == n_projs - 1
 
 
 @testing.requires_testing_data

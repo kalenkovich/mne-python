@@ -20,6 +20,7 @@ from pathlib import Path
 import warnings
 
 import numpy as np
+import scipy
 from scipy import linalg
 from scipy.linalg import LinAlgError
 
@@ -315,6 +316,22 @@ except ImportError:
 
 
 ###############################################################################
+# Orth with rcond argument (SciPy 1.1)
+
+if LooseVersion(scipy.__version__) >= '1.1':
+    from scipy.linalg import orth
+else:
+    def orth(A, rcond=None):  # noqa
+        u, s, vh = linalg.svd(A, full_matrices=False)
+        M, N = u.shape[0], vh.shape[1]
+        if rcond is None:
+            rcond = numpy.finfo(s.dtype).eps * max(M, N)
+        tol = np.amax(s) * rcond
+        num = np.sum(s > tol, dtype=int)
+        Q = u[:, :num]
+        return Q
+
+###############################################################################
 # NumPy Generator (NumPy 1.17)
 
 def rng_uniform(rng):
@@ -341,10 +358,9 @@ def _validate_sos(sos):
 
 # Deal with nibabel 2.5 img.get_data() deprecation
 def _get_img_fdata(img):
-    try:
-        return img.get_fdata()
-    except AttributeError:
-        return img.get_data().astype(float)
+    data = np.asanyarray(img.dataobj)
+    dtype = np.complex128 if np.iscomplexobj(data) else np.float64
+    return data.astype(dtype)
 
 
 def _read_volume_info(fobj):
@@ -976,6 +992,24 @@ def stable_cumsum(arr, axis=None, rtol=1e-05, atol=1e-08):
     return out
 
 
+# This shim can be removed once NumPy 1.19.0+ is required (1.18.4 has sign bug)
+def svd(a, hermitian=False):
+    if hermitian:  # faster
+        s, u = np.linalg.eigh(a)
+        sgn = np.sign(s)
+        s = np.abs(s)
+        sidx = np.argsort(s)[..., ::-1]
+        sgn = take_along_axis(sgn, sidx, axis=-1)
+        s = take_along_axis(s, sidx, axis=-1)
+        u = take_along_axis(u, sidx[..., None, :], axis=-1)
+        # singular values are unsigned, move the sign into v
+        vt = (u * sgn[..., np.newaxis, :]).swapaxes(-2, -1).conj()
+        np.abs(s, out=s)
+        return u, s, vt
+    else:
+        return np.linalg.svd(a)
+
+
 ###############################################################################
 # NumPy einsum backward compat (allow "optimize" arg and fix 1.14.0 bug)
 # XXX eventually we should hand-tune our `einsum` calls given our array sizes!
@@ -986,15 +1020,57 @@ def einsum(*args, **kwargs):
     return np.einsum(*args, **kwargs)
 
 
+try:
+    from numpy import take_along_axis
+except ImportError:  # NumPy < 1.15
+    def take_along_axis(arr, indices, axis):
+        # normalize inputs
+        if axis is None:
+            arr = arr.flat
+            arr_shape = (len(arr),)  # flatiter has no .shape
+            axis = 0
+        else:
+            # there is a NumPy function for this, but rather than copy our
+            # internal uses should be correct, so just normalize quickly
+            if axis < 0:
+                axis += arr.ndim
+            assert 0 <= axis < arr.ndim
+            arr_shape = arr.shape
+
+        # use the fancy index
+        return arr[_make_along_axis_idx(arr_shape, indices, axis)]
+
+    def _make_along_axis_idx(arr_shape, indices, axis):
+        # compute dimensions to iterate over
+        if not np.issubdtype(indices.dtype, np.integer):
+            raise IndexError('`indices` must be an integer array')
+        if len(arr_shape) != indices.ndim:
+            raise ValueError(
+                "`indices` and `arr` must have the same number of dimensions")
+        shape_ones = (1,) * indices.ndim
+        dest_dims = list(range(axis)) + [None] + list(range(axis+1, indices.ndim))
+
+        # build a fancy index, consisting of orthogonal aranges, with the
+        # requested index inserted at the right location
+        fancy_index = []
+        for dim, n in zip(dest_dims, arr_shape):
+            if dim is None:
+                fancy_index.append(indices)
+            else:
+                ind_shape = shape_ones[:dim] + (-1,) + shape_ones[dim+1:]
+                fancy_index.append(np.arange(n).reshape(ind_shape))
+
+        return tuple(fancy_index)
+
 ###############################################################################
 # From nilearn
 
 def _crop_colorbar(cbar, cbar_vmin, cbar_vmax):
     """
     crop a colorbar to show from cbar_vmin to cbar_vmax
-
     Used when symmetric_cbar=False is used.
     """
+    import matplotlib
     if (cbar_vmin is None) and (cbar_vmax is None):
         return
     cbar_tick_locs = cbar.locator.locs
@@ -1004,12 +1080,24 @@ def _crop_colorbar(cbar, cbar_vmin, cbar_vmax):
         cbar_vmin = cbar_tick_locs.min()
     new_tick_locs = np.linspace(cbar_vmin, cbar_vmax,
                                 len(cbar_tick_locs))
-    cbar.ax.set_ylim(cbar.norm(cbar_vmin), cbar.norm(cbar_vmax))
-    outline = cbar.outline.get_xy()
-    outline[:2, 1] += cbar.norm(cbar_vmin)
-    outline[2:6, 1] -= (1. - cbar.norm(cbar_vmax))
-    outline[6:, 1] += cbar.norm(cbar_vmin)
-    cbar.outline.set_xy(outline)
+
+    # matplotlib >= 3.2.0 no longer normalizes axes between 0 and 1
+    # See https://matplotlib.org/3.2.1/api/prev_api_changes/api_changes_3.2.0.html
+    if LooseVersion(matplotlib.__version__) >= LooseVersion("3.2.0"):
+        cbar.ax.set_ylim(cbar_vmin, cbar_vmax)
+        X, _ = cbar._mesh()
+        new_X = np.array([X[0], X[-1]])
+        new_Y = np.array([[cbar_vmin, cbar_vmin], [cbar_vmax, cbar_vmax]])
+        xy = cbar._outline(new_X, new_Y)
+        cbar.outline.set_xy(xy)
+    else:
+        cbar.ax.set_ylim(cbar.norm(cbar_vmin), cbar.norm(cbar_vmax))
+        outline = cbar.outline.get_xy()
+        outline[:2, 1] += cbar.norm(cbar_vmin)
+        outline[2:6, 1] -= (1. - cbar.norm(cbar_vmax))
+        outline[6:, 1] += cbar.norm(cbar_vmin)
+        cbar.outline.set_xy(outline)
+
     cbar.set_ticks(new_tick_locs, update_ticks=True)
 
 
